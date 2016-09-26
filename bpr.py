@@ -8,6 +8,7 @@ implementing different sampling strategies.
 import numpy as np
 from math import exp
 import random
+import cPickle
 
 class BPRArgs(object):
 
@@ -48,7 +49,8 @@ class BPR(object):
         print 'initial loss = {0}'.format(self.loss())
         for it in xrange(num_iters):
             print 'starting iteration {0}'.format(it)
-            for u,i,j in sampler.generate_samples(self.data):
+            #for u,i,j in sampler.generate_samples(self.data):
+            for u,i,j in self.loss_samples:
                 self.update_factors(u,i,j)
             print 'iteration {0}: loss = {1}'.format(it,self.loss())
 
@@ -69,6 +71,8 @@ class BPR(object):
         print 'sampling {0} <user,item i,item j> triples...'.format(num_loss_samples)
         sampler = UniformUserUniformItem(True)
         self.loss_samples = [t for t in sampler.generate_samples(data,num_loss_samples)]
+        print len(self.loss_samples)
+        print self.loss_samples[0]
 
     def update_factors(self,u,i,j,update_u=True,update_i=True):
         """apply SGD update"""
@@ -77,9 +81,17 @@ class BPR(object):
         x = self.item_bias[i] - self.item_bias[j] \
             + np.dot(self.user_factors[u,:],self.item_factors[i,:]-self.item_factors[j,:])
 
-        z = 1.0/(1.0+exp(x))
+        # the derivative of the sigmod function
+        # notice: exp(x) may raise the overflow problem)
+        ans = 0
+        try:
+            ans = exp(x)
+        except OverflowError:
+            ans = float('inf')
+        z = 1.0/(1.0+ans)
 
         # update bias terms
+        # user bias?
         if update_i:
             d = z - self.bias_regularization * self.item_bias[i]
             self.item_bias[i] += self.learning_rate * d
@@ -91,6 +103,7 @@ class BPR(object):
             d = (self.item_factors[i,:]-self.item_factors[j,:])*z - self.user_regularization*self.user_factors[u,:]
             self.user_factors[u,:] += self.learning_rate*d
         if update_i:
+            # derivative * user factor - regularization ( maximize )
             d = self.user_factors[u,:]*z - self.positive_item_regularization*self.item_factors[i,:]
             self.item_factors[i,:] += self.learning_rate*d
         if update_j:
@@ -101,7 +114,13 @@ class BPR(object):
         ranking_loss = 0;
         for u,i,j in self.loss_samples:
             x = self.predict(u,i) - self.predict(u,j)
-            ranking_loss += 1.0/(1.0+exp(x))
+            ans = 0
+            try:
+                ans = exp(x)
+            except OverflowError:
+                ans = float('inf')
+            z = 1.0/(1.0+ans)
+            ranking_loss += z 
 
         complexity = 0;
         for u,i,j in self.loss_samples:
@@ -125,6 +144,7 @@ class Sampler(object):
         self.sample_negative_items_empirically = sample_negative_items_empirically
 
     def init(self,data,max_samples=None):
+        # data is a matrix
         self.data = data
         self.num_users,self.num_items = data.shape
         self.max_samples = max_samples
@@ -151,6 +171,8 @@ class Sampler(object):
         if self.sample_negative_items_empirically:
             # just pick something someone rated!
             u = self.uniform_user()
+            while len(self.data[u].indices) == 0:
+                u = self.uniform_user()
             i = random.choice(self.data[u].indices)
         else:
             i = random.randint(0,self.num_items-1)
@@ -168,6 +190,10 @@ class UniformUserUniformItem(Sampler):
         for _ in xrange(self.num_samples(self.data.nnz)):
             u = self.uniform_user()
             # sample positive item
+            # print self.data[u].indices
+            if len(self.data[u].indices) == 0:
+                continue
+            # print len(self.data[u].indices)
             i = random.choice(self.data[u].indices)
             j = self.sample_negative_item(self.data[u].indices)
             yield u,i,j
@@ -222,7 +248,6 @@ class UniformPairWithoutReplacement(Sampler):
             yield u,i,j
 
 class ExternalSchedule(Sampler):
-
     def __init__(self,filepath,index_offset=0):
         self.filepath = filepath
         self.index_offset = index_offset
@@ -243,7 +268,10 @@ if __name__ == '__main__':
     import sys
     from scipy.io import mmread
 
-    data = mmread(sys.argv[1]).tocsr()
+    #data = mmread(sys.argv[1]).tocsr()
+    # data type: csr_matrix
+    print 'loading data...'
+    data = cPickle.load(file('../data/matrix'))
 
     args = BPRArgs()
     args.learning_rate = 0.3
@@ -254,4 +282,5 @@ if __name__ == '__main__':
     sample_negative_items_empirically = True
     sampler = UniformPairWithoutReplacement(sample_negative_items_empirically)
     num_iters = 10
+    print 'training...'
     model.train(data,sampler,num_iters)
